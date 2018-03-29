@@ -109,6 +109,7 @@ def parse_pages(start_page, endtime, song_db, forward_direction=True):
     LOG.info(f"Database contains {len(songs)} timestamped songs and")
     LOG.info(f"{len(broken_ts_list)} non timestamped songs.")
     LOG.info(f"song_db[latest_ts]={song_db['latest_ts']}")
+    latest_tmp = song_db['latest_ts']
     while page_limits[0] < curpage < page_limits[1]:
         url = f"http://r-a-d.io/last-played?page={curpage}"
         LOG.debug("Getting results from page %d", curpage)
@@ -133,6 +134,8 @@ def parse_pages(start_page, endtime, song_db, forward_direction=True):
                         continue
                     else:
                         broken_ts_list.append(f"{tmp};{song}")
+                if tmp > latest_tmp:
+                    latest_tmp = tmp
         except ValueError:
             # we are done with the parsing
             break
@@ -147,12 +150,12 @@ def parse_pages(start_page, endtime, song_db, forward_direction=True):
             song_db['broken_ts_list'] = list(set(broken_ts_list))
             save_db(song_db)
     else:
-        LOG.warn(f"""Page {curpage} outside of limits! There is might be a problem with 
+        LOG.warn(f"""Page {curpage} outside of limits! There is might be a problem with
 limits or with the code!""")
     # save last time
     if forward_direction:
         # update timestamp
-        song_db['latest_ts'] = tmp
+        song_db['latest_ts'] = latest_tmp
     save_db(song_db)
 
 
