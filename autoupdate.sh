@@ -6,6 +6,7 @@ LOGNAME=${BASEDIR}/$(date +"%d_%m_%y_parse.log")
 
 cd $BASEDIR
 xz -d songs_db.json.xz
+echo "Starting to update..."
 python $PYSCRIPT update &> $LOGNAME
 xz -z songs_db.json
 git add . --all
