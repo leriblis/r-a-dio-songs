@@ -81,8 +81,9 @@ def get_songs(page, session):
     soup = BeautifulSoup(data.text, "html5lib")
     results = []
     for l in soup.select("li[class='list-group-item']"):
-        spans = l.find_all('span')
-        results.append((spans[0].get('title', 'nan'), spans[1].text))
+        title = l.find('span').text
+        song_time = l.find('time').get('datetime','nan')
+        results.append((song_time, title))
     return results
 
 
