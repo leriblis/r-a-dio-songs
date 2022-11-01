@@ -58,7 +58,8 @@ s.get("http://r-a-d.io/last-played")
 def parse_arguments():
     parser = argparse.ArgumentParser(description="""Parse last-played songs
         from https://r-a-d.io""")
-    parser.add_argument('action', choices=['update', 'init'])
+    parser.add_argument('action', choices=['update', 'init', 'resume'])
+    parser.add_argument('--page', type=int, help='Only used if action = resume')
     return parser.parse_args()
 
 
@@ -145,9 +146,10 @@ def parse_pages(start_page, endtime, song_db, forward_direction=True):
             curpage += 1
         else:
             curpage -= 1
-        if curpage % 10 == 0:
+        if curpage % 100 == 0:
             # delete duplicates from broken_ts_list
             LOG.info(f"Currently on page {curpage}")
+            LOG.info(f" latest timestamp is: {tmp}")
             song_db['broken_ts_list'] = list(set(broken_ts_list))
             save_db(song_db)
     else:
@@ -181,6 +183,14 @@ def main():
         forward_direction = True
         endtime = datetime.strptime(song_db['latest_ts'], '%Y-%m-%dT%H:%M:%S%z')
         start_page = 1
+    elif args.action == 'resume':
+        LOG.info(f"Resuming update after interruption from page: {args.page}")
+        with open(DBNAME) as f:
+            song_db = json.load(f)
+        start_page = args.page - 1
+        forward_direction = True
+        endtime = datetime.strptime(song_db['latest_ts'], '%Y-%m-%dT%H:%M:%S%z')
+
     original_db_size = len(song_db['songs_dic']) + len(song_db['broken_ts_list'])
     LOG.info(f"Initial db size: {original_db_size}")
     LOG.info(f"Starting at page={start_page} and ending at {endtime.strftime(RADIO_DATE_FMT)}")
