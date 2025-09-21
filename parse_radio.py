@@ -149,7 +149,7 @@ def parse_pages(start_page, endtime, song_db, forward_direction=True):
         if curpage % 100 == 0:
             # delete duplicates from broken_ts_list
             LOG.info(f"Currently on page {curpage}")
-            LOG.info(f" latest timestamp is: {tmp}")
+            LOG.info(f" latest timestamp is: {latest_tmp}")
             song_db['broken_ts_list'] = list(set(broken_ts_list))
             save_db(song_db)
     else:
@@ -202,5 +202,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
