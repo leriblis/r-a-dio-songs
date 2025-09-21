@@ -3,10 +3,21 @@
 set -e  # Exit script if any command fails
 
 BASEDIR=$(dirname "$0")
+VENV_DIR=${BASEDIR}/.venv
 PYSCRIPT=${BASEDIR}/parse_radio.py
 LOGNAME=${BASEDIR}/$(date +"%Y_%m_%d_parse.log") # Updated with hours, minutes, and seconds to prevent overwriting logs from the same day
 
 cd "$BASEDIR"
+
+# Create and activate virtual environment
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv "$VENV_DIR"
+fi
+
+source "$VENV_DIR/bin/activate"
+pip install -r requirements.txt
+
 # Check if songs_db.json.xz exists
 if [ -f songs_db.json.xz ]; then
     # Decompress it and overwrite songs_db.json if it already exists

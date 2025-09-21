@@ -2,3 +2,4 @@
 __pycache__
 *.log
 songs_db.json
+.venv
