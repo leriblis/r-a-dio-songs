@@ -9,14 +9,37 @@ LOGNAME=${BASEDIR}/$(date +"%Y_%m_%d_parse.log") # Updated with hours, minutes, 
 
 cd "$BASEDIR"
 
-# Create and activate virtual environment
+# Create virtual environment if needed
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtual environment..."
-    python3 -m venv "$VENV_DIR"
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "Error: python3 is not installed or not on PATH." >&2
+        exit 1
+    fi
+
+    if ! python3 -m venv "$VENV_DIR"; then
+        echo "Error: failed to create virtual environment in $VENV_DIR." >&2
+        echo "On Debian/Ubuntu, install the python3-venv package: sudo apt install python3-venv" >&2
+        exit 1
+    fi
 fi
 
-source "$VENV_DIR/bin/activate"
-pip install -r requirements.txt
+if [ ! -x "$VENV_DIR/bin/python" ]; then
+    echo "Error: $VENV_DIR/bin/python not found." >&2
+    exit 1
+fi
+
+# Ensure pip is available inside the virtual environment
+if ! "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "Pip not found in the virtual environment; bootstrapping with ensurepip..."
+    if ! "$VENV_DIR/bin/python" -m ensurepip --upgrade; then
+        echo "Error: failed to install pip via ensurepip." >&2
+        exit 1
+    fi
+fi
+
+"$VENV_DIR/bin/python" -m pip install --upgrade pip
+"$VENV_DIR/bin/python" -m pip install -r requirements.txt
 
 # Check if songs_db.json.xz exists
 if [ -f songs_db.json.xz ]; then
@@ -34,7 +57,7 @@ fi
 echo "Starting to update..."
 
 # Run the Python script and capture its exit code
-python "$PYSCRIPT" update &> "$LOGNAME"
+"$VENV_DIR/bin/python" "$PYSCRIPT" update &> "$LOGNAME"
 echo "Python script finished. Check the log at $LOGNAME for details."
 EXIT_CODE=$?
 
