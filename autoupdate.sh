@@ -3,20 +3,10 @@
 set -e  # Exit script if any command fails
 
 BASEDIR=$(dirname "$0")
-VENV_DIR=${BASEDIR}/.venv
 PYSCRIPT=${BASEDIR}/parse_radio.py
-LOGNAME=${BASEDIR}/$(date +"%Y_%m_%d_parse.log") # Updated with hours, minutes, and seconds to prevent overwriting logs from the same day
+LOGNAME=${BASEDIR}/$(date +"%Y_%m_%d_parse.log")
 
 cd "$BASEDIR"
-
-# Create and activate virtual environment
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv "$VENV_DIR"
-fi
-
-source "$VENV_DIR/bin/activate"
-pip install -r requirements.txt
 
 # Check if songs_db.json.xz exists
 if [ -f songs_db.json.xz ]; then
@@ -34,9 +24,9 @@ fi
 echo "Starting to update..."
 
 # Run the Python script and capture its exit code
-python "$PYSCRIPT" update &> "$LOGNAME"
-echo "Python script finished. Check the log at $LOGNAME for details."
+uv run "$PYSCRIPT" update &> "$LOGNAME"
 EXIT_CODE=$?
+echo "Python script finished. Check the log at $LOGNAME for details."
 
 # Check if the Python script failed
 if [ $EXIT_CODE -ne 0 ]; then

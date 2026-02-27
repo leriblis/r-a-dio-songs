@@ -14,14 +14,16 @@ Songs are stored in songs_db.json that has the following structure:
     ],
     # store the timestamp of the latest song saved
     # only used in update mode
-    "latest_ts" : <timestamp, fmt='%Y-%m-%dT%H:%M:%S%z'>
+    "latest_ts" : <timestamp, fmt='%Y-%m-%dT%H:%M:%S%z'>,
+    # (optional) last URL visited, used for resuming interrupted updates
+    "resume_url" : <url string or null>
 }
 
 """
 import requests, os
 from bs4 import BeautifulSoup
 import json, time, argparse
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
@@ -33,59 +35,79 @@ DBNAME = os.path.join(PWD, 'songs_db.json')
 PAGE_PAUSE_TIME = 0.3
 LOG = logging.getLogger('parse_radio')
 
+BASE_URL = 'https://r-a-d.io'
+FIRST_PAGE_URL = f'{BASE_URL}/last-played?from=4294967295&page=1'
+
 HEADERS = {
-    "Host":
-        "r-a-d.io",
     "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:58.0) Gecko/20100101 Firefox/58.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
     "Accept":
         "text/html, */*; q=0.01",
     "Accept-Language":
         "en-US,en;q=0.5",
     "Accept-Encoding":
         "gzip, deflate",
-    "Referer":
-        "http://r-a-d.io/last-played?page=1",
-    "X-Requested-With":
-        "XMLHttpRequest"
 }
 
 s = requests.Session()
-# init cache
-s.get("http://r-a-d.io/last-played")
+
+
+class ParsingComplete(Exception):
+    """Raised when we've reached the endtime boundary."""
+    pass
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="""Parse last-played songs
         from https://r-a-d.io""")
     parser.add_argument('action', choices=['update', 'init', 'resume'])
-    parser.add_argument('--page', type=int, help='Only used if action = resume')
+    parser.add_argument('--max-pages', type=int, default=0,
+                        help='Stop after N pages (0 = no limit)')
     return parser.parse_args()
 
 
-def parse_page_one():
-    p1 = s.get("http://r-a-d.io/last-played?page=1", headers=HEADERS)
-    soup = BeautifulSoup(p1.text, "html5lib")
-    ts1 = soup.find('li').find('span')['title'] # 1st timestamp
-    last_page = soup.select('ul[class="pagination"]')[0].find_all("li")[-2].text
-    return ts1, int(last_page)
-
-
-def get_songs(page, session):
+def get_songs(url, session):
     """
-    Get songs from a given page
-    page: str
-        url of page on radio
-    session: requests object
+    Get songs from a given page.
+
+    Returns:
+        (results, next_url) where results is a list of (iso_timestamp, title)
+        and next_url is the URL for the next page (or None if no more pages).
     """
-    data = session.get(page, headers=HEADERS)
+    data = session.get(url, headers=HEADERS)
+    data.raise_for_status()
     soup = BeautifulSoup(data.text, "html5lib")
     results = []
-    for l in soup.select("li[class='list-group-item']"):
-        title = l.find('span').text
-        song_time = l.find('time').get('datetime','nan')
-        results.append((song_time, title))
-    return results
+    for block in soup.select("#page-lastplayed div.block"):
+        time_el = block.find('time')
+        if not time_el:
+            continue
+        # Timestamps are now Unix integers
+        unix_ts = time_el.get('datetime', '')
+        try:
+            dt = datetime.fromtimestamp(int(unix_ts), tz=timezone.utc)
+            iso_ts = dt.strftime(RADIO_DATE_FMT)
+        except (ValueError, OSError):
+            iso_ts = 'nan'
+
+        # Song title is in the non-narrow column with background class
+        title_col = block.select_one(
+            'div.column.has-background-radio-secondary-1:not(.is-narrow)')
+        if not title_col:
+            continue
+        title = title_col.get_text(strip=True)
+        results.append((iso_ts, title))
+
+    # Extract next page URL from pagination
+    next_url = None
+    next_link = soup.select_one('a.pagination-next:not(.is-disabled)')
+    if next_link and next_link.get('href'):
+        href = next_link['href']
+        if not href.startswith('http'):
+            href = BASE_URL + href
+        next_url = href
+
+    return results, next_url
 
 
 def save_db(song_db):
@@ -96,69 +118,84 @@ def save_db(song_db):
         json.dump(song_db, f, ensure_ascii=False)
 
 
-def parse_pages(start_page, endtime, song_db, forward_direction=True):
+def parse_pages(start_url, endtime, song_db, max_pages=0):
     """
-    Save songs to db
+    Scrape songs page by page, following pagination links.
 
-    start_page: int
-    endtime: timezone aware datetime object
-    song_db: dic
+    start_url: str - URL of the first page to scrape
+    endtime: timezone-aware datetime - stop when reaching this timestamp
+             (None means scrape everything, used for init mode)
+    song_db: dict
+    max_pages: int - stop after this many pages (0 = no limit)
     """
-    page_limits = (0, 75000)
-    curpage = start_page
     songs = song_db['songs_dic']
     broken_ts_list = song_db['broken_ts_list']
     LOG.info(f"Database contains {len(songs)} timestamped songs and")
     LOG.info(f"{len(broken_ts_list)} non timestamped songs.")
     LOG.info(f"song_db[latest_ts]={song_db['latest_ts']}")
     latest_tmp = song_db['latest_ts']
-    while page_limits[0] < curpage < page_limits[1]:
-        url = f"http://r-a-d.io/last-played?page={curpage}"
-        LOG.debug("Getting results from page %d", curpage)
-        results = get_songs(url, s)
-        LOG.debug("A total of %d results obtained", len(results))
-        # parse songs
+    current_url = start_url
+    page_count = 0
+    done = False
+
+    while current_url and not done:
+        page_count += 1
+        LOG.debug("Getting results from %s", current_url)
         try:
-            for tmp, song in results:
-                # check if we are over limit
-                dt = datetime.strptime(tmp, RADIO_DATE_FMT)
-                if forward_direction and dt <= endtime:
-                    # forward = we move from newer to older songs
-                    raise ValueError("Parsing finished!")
-                if not forward_direction and dt > endtime:
-                    # backward = we move from older to newer
-                    raise ValueError("Parsing finished!")
-                if tmp not in songs:
-                    songs[tmp] = song
-                else:
-                    if songs[tmp] == song:
-                        LOG.debug(f"Duplicate at tmp={tmp}, skipping.")
-                        continue
-                    else:
-                        broken_ts_list.append(f"{tmp};{song}")
-                if tmp > latest_tmp:
-                    latest_tmp = tmp
-        except ValueError:
-            # we are done with the parsing
+            results, next_url = get_songs(current_url, s)
+        except requests.RequestException as e:
+            LOG.error(f"Request failed for {current_url}: {e}")
             break
+        LOG.debug("A total of %d results obtained", len(results))
+
+        for tmp, song in results:
+            # Handle broken timestamps
+            try:
+                dt = datetime.strptime(tmp, RADIO_DATE_FMT)
+            except ValueError:
+                broken_ts_list.append(f"{tmp};{song}")
+                continue
+
+            # Pages go from newest to oldest; stop when we reach known songs
+            if endtime is not None and dt <= endtime:
+                done = True
+                break
+
+            if tmp not in songs:
+                songs[tmp] = song
+            else:
+                if songs[tmp] == song:
+                    LOG.debug(f"Duplicate at tmp={tmp}, skipping.")
+                    continue
+                else:
+                    broken_ts_list.append(f"{tmp};{song}")
+            if tmp > latest_tmp:
+                latest_tmp = tmp
+
+        if done:
+            break
+
+        if max_pages and page_count >= max_pages:
+            LOG.info(f"Reached max pages limit ({max_pages}).")
+            break
+
+        current_url = next_url
         time.sleep(PAGE_PAUSE_TIME)
-        if forward_direction:
-            curpage += 1
-        else:
-            curpage -= 1
-        if curpage % 100 == 0:
-            # delete duplicates from broken_ts_list
-            LOG.info(f"Currently on page {curpage}")
+
+        if page_count % 100 == 0:
+            LOG.info(f"Currently on page {page_count}")
             LOG.info(f" latest timestamp is: {latest_tmp}")
             song_db['broken_ts_list'] = list(set(broken_ts_list))
+            song_db['resume_url'] = current_url
             save_db(song_db)
-    else:
-        LOG.warn(f"""Page {curpage} outside of limits! There is might be a problem with
-limits or with the code!""")
-    # save last time
-    if forward_direction:
-        # update timestamp
-        song_db['latest_ts'] = latest_tmp
+
+    if current_url is None and not done:
+        LOG.info("Reached the last page of results.")
+
+    # Update latest_ts and save
+    song_db['latest_ts'] = latest_tmp
+    song_db['resume_url'] = None
+    song_db['broken_ts_list'] = list(set(broken_ts_list))
     save_db(song_db)
 
 
@@ -168,38 +205,48 @@ def main():
         LOG.info("Initializing new database from start!")
         if os.path.isfile(DBNAME):
             raise ValueError(f"Database file {DBNAME} already exists!")
-        endtime, start_page = parse_page_one()
-        endtime = datetime.strptime(endtime, '%Y-%m-%dT%H:%M:%S%z')
+        # Get the first (newest) timestamp to set as latest_ts
+        results, _ = get_songs(FIRST_PAGE_URL, s)
+        if not results:
+            raise ValueError("Could not get any songs from page 1!")
+        newest_ts = results[0][0]
         song_db = {
-            "songs_dic" : {},
+            "songs_dic": {},
             "broken_ts_list": [],
-            "latest_ts": endtime.strftime(RADIO_DATE_FMT)
+            "latest_ts": newest_ts,
+            "resume_url": None
         }
-        forward_direction = False
+        start_url = FIRST_PAGE_URL
+        endtime = None  # scrape everything
     elif args.action == 'update':
         LOG.info(f"Updating existing database at: {DBNAME}")
         with open(DBNAME) as f:
             song_db = json.load(f)
-        forward_direction = True
-        endtime = datetime.strptime(song_db['latest_ts'], '%Y-%m-%dT%H:%M:%S%z')
-        start_page = 1
+        song_db.setdefault('resume_url', None)
+        endtime = datetime.strptime(song_db['latest_ts'], RADIO_DATE_FMT)
+        start_url = FIRST_PAGE_URL
     elif args.action == 'resume':
-        LOG.info(f"Resuming update after interruption from page: {args.page}")
+        LOG.info("Resuming interrupted update...")
         with open(DBNAME) as f:
             song_db = json.load(f)
-        start_page = args.page - 1
-        forward_direction = True
-        endtime = datetime.strptime(song_db['latest_ts'], '%Y-%m-%dT%H:%M:%S%z')
+        start_url = song_db.get('resume_url')
+        if not start_url:
+            LOG.info("No resume URL found, starting from page 1.")
+            start_url = FIRST_PAGE_URL
+        else:
+            LOG.info(f"Resuming from: {start_url}")
+        endtime = datetime.strptime(song_db['latest_ts'], RADIO_DATE_FMT)
 
     original_db_size = len(song_db['songs_dic']) + len(song_db['broken_ts_list'])
     LOG.info(f"Initial db size: {original_db_size}")
-    LOG.info(f"Starting at page={start_page} and ending at {endtime.strftime(RADIO_DATE_FMT)}")
-    parse_pages(start_page, endtime, song_db, forward_direction=forward_direction)
+    LOG.info(f"Starting at {start_url}")
+    if endtime:
+        LOG.info(f"Will stop at: {endtime.strftime(RADIO_DATE_FMT)}")
+    parse_pages(start_url, endtime, song_db, max_pages=args.max_pages)
     final_db_size = len(song_db['songs_dic']) + len(song_db['broken_ts_list'])
     LOG.info(f"Final db_size: {final_db_size}")
-    LOG.info(f"Db increased by: {final_db_size-original_db_size}")
+    LOG.info(f"Db increased by: {final_db_size - original_db_size}")
 
 
 if __name__ == '__main__':
     main()
-
