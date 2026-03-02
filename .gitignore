@@ -2,4 +2,12 @@
 __pycache__
 *.log
 songs_db.json
+dj_sets.json
 .venv
+.python-version
+.playwright-cli/
+.DS_Store
+requests/
+sets/
+review_downloads/
+cookies.txt
